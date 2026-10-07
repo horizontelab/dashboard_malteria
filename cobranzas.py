@@ -1,4 +1,4 @@
-"""Cuentas por cobrar (FACTURA Santander) y concentracion de clientes (VENTAS)."""
+"""Cuentas por cobrar 2026 (MARGEN X VENTAS), historico (FACTURA Santander) y concentracion (VENTAS)."""
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
@@ -8,8 +8,7 @@ from productos import a_numero, mes_a_indice
 from clientes import cliente_canonico
 
 COBRADO = {"SI", "SÍ", "S"}
-PENDIENTE = {"NO", "", "ATENCION", "ATENCIÓN"}
-VIGENTE_DIAS = 365                     # mas viejo que esto = "a revisar", no cuenta como pendiente
+ATENCION = {"ATENCION", "ATENCIÓN"}
 
 
 def columna(encabezado, nombre, hoja):
@@ -32,23 +31,12 @@ def a_fecha(v):
     return None
 
 
-def tramo(f, hoy):
-    if f is None:
-        return "Sin fecha"
-    dias = (hoy - f).days
-    if dias <= 90:
-        return "Hasta 90 dias"
-    if dias <= VIGENTE_DIAS:
-        return "91 a 365 dias"
-    return "Mas de 1 anio"
-
-
 def cuentas_por_cobrar(filas, hoy):
+    """MARGEN X VENTAS: una fila por orden. Todo lo que no dice SI en 'Cobrado' es por cobrar."""
+    hoja = "MARGEN X VENTAS"
     enc = filas[0]
-    c_fec = columna(enc, "Fecha factura", "FACTURA Santander")
-    c_cli = columna(enc, "Cliente", "FACTURA Santander")
-    c_imp = columna(enc, "Importe", "FACTURA Santander")
-    c_cob = columna(enc, "Cobrado", "FACTURA Santander")
+    c_mes, c_cli = columna(enc, "MES", hoja), columna(enc, "Cliente", hoja)
+    c_imp, c_cob = columna(enc, "Ventas / FACTURACION", hoja), columna(enc, "Cobrado", hoja)
 
     pendientes, ambiguas = [], []
     for n, fila in enumerate(filas[1:], start=2):
@@ -56,32 +44,56 @@ def cuentas_por_cobrar(filas, hoy):
         cliente, importe = str(celda(c_cli)).strip(), a_numero(celda(c_imp))
         if not cliente or importe <= 0:
             continue
-        estado = limpiar(celda(c_cob))
+        crudo = str(celda(c_cob)).strip()
+        estado = limpiar(crudo)
         if estado in COBRADO:
             continue
-        f = a_fecha(celda(c_fec))
-        item = {"fila": n, "factura": celda(0), "fecha": f, "cliente": cliente_canonico(cliente),
-                "importe": importe, "tramo": tramo(f, hoy)}
-        if estado in PENDIENTE:
-            pendientes.append(item)
+        m = mes_a_indice(celda(c_mes))
+        item = {"fila": n, "cliente": cliente_canonico(cliente), "importe": importe,
+                "mes": MESES[m] if m is not None else "?",
+                # la planilla es del anio en curso: atraso = meses entre la venta y hoy
+                "meses_atraso": (hoy.month - 1 - m) if m is not None else None}
+        if estado == "NO":
+            item["estado"] = "No cobrado"
+        elif estado == "":
+            item["estado"] = "Sin marcar"
+        elif estado in ATENCION:
+            item["estado"] = "Atencion"
         else:
-            item["marca"] = str(celda(c_cob))
+            item["estado"], item["marca"] = "Ambigua", crudo
             ambiguas.append(item)
+            continue
+        pendientes.append(item)
 
-    por_tramo = defaultdict(lambda: [0, 0.0])
+    por_cliente, por_estado = defaultdict(float), defaultdict(lambda: [0, 0.0])
     for p in pendientes:
-        por_tramo[p["tramo"]][0] += 1
-        por_tramo[p["tramo"]][1] += p["importe"]
+        por_cliente[p["cliente"]] += p["importe"]
+        por_estado[p["estado"]][0] += 1
+        por_estado[p["estado"]][1] += p["importe"]
+    return {"total": sum(p["importe"] for p in pendientes), "ordenes": len(pendientes),
+            "por_estado": dict(por_estado),
+            "deudores": sorted(([c, v] for c, v in por_cliente.items()), key=lambda x: -x[1]),
+            "pendientes": sorted(pendientes, key=lambda p: -p["importe"]), "ambiguas": ambiguas}
 
-    vigentes = [p for p in pendientes if p["tramo"] not in ("Mas de 1 anio",)]
-    viejas = [p for p in pendientes if p["tramo"] == "Mas de 1 anio"]
-    deudores = defaultdict(float)
-    for p in vigentes:
-        deudores[p["cliente"]] += p["importe"]
 
-    return {"total_vigente": sum(p["importe"] for p in vigentes), "facturas_vigentes": len(vigentes),
-            "deudores": sorted(([c, v] for c, v in deudores.items()), key=lambda x: -x[1]),
-            "por_tramo": dict(por_tramo), "viejas": viejas, "ambiguas": ambiguas}
+def historico_santander(filas):
+    """FACTURA Santander (se uso hasta 2024): facturas que nunca se marcaron como cobradas."""
+    hoja = "FACTURA Santander"
+    enc = filas[0]
+    c_fec, c_cli = columna(enc, "Fecha factura", hoja), columna(enc, "Cliente", hoja)
+    c_imp, c_cob = columna(enc, "Importe", hoja), columna(enc, "Cobrado", hoja)
+    pendientes, ultima = [], None
+    for n, fila in enumerate(filas[1:], start=2):
+        celda = lambda i: fila[i] if i < len(fila) else ""
+        f = a_fecha(celda(c_fec))
+        if f:
+            ultima = f if ultima is None or f > ultima else ultima
+        cliente, importe = str(celda(c_cli)).strip(), a_numero(celda(c_imp))
+        if cliente and importe > 0 and limpiar(celda(c_cob)) in {"NO", ""} | ATENCION:
+            pendientes.append({"fila": n, "factura": celda(0), "fecha": f,
+                               "cliente": cliente_canonico(cliente), "importe": importe})
+    return {"total": sum(p["importe"] for p in pendientes), "facturas": len(pendientes),
+            "ultima_factura": ultima, "pendientes": sorted(pendientes, key=lambda p: -p["importe"])}
 
 
 def concentracion(filas, meses_idx, top_n=3):
@@ -105,38 +117,38 @@ def concentracion(filas, meses_idx, top_n=3):
 def calcular_cobranzas(meses_idx, hoy=None):
     hoy = hoy or date.today()
     sheets = conectar()
-    cxc = cuentas_por_cobrar(leer_hoja(sheets, ADMIN_ID, "FACTURA Santander"), hoy)
+    cxc = cuentas_por_cobrar(leer_hoja(sheets, ADMIN_ID, "MARGEN X VENTAS"), hoy)
+    hist = historico_santander(leer_hoja(sheets, ADMIN_ID, "FACTURA Santander"))
     conc = concentracion(leer_hoja(sheets, ADMIN_ID, "VENTAS"), meses_idx)
-    return cxc, conc
+    return cxc, hist, conc
 
 
 if __name__ == "__main__":
     r = calcular()
     meses_idx = [MESES.index(m) for m in r["meses"]]
-    cxc, conc = calcular_cobranzas(meses_idx)
+    cxc, hist, conc = calcular_cobranzas(meses_idx)
 
-    print("CUENTAS POR COBRAR - por antiguedad")
-    for t in ["Hasta 90 dias", "91 a 365 dias", "Mas de 1 anio", "Sin fecha"]:
-        if t in cxc["por_tramo"]:
-            n, v = cxc["por_tramo"][t]
-            print(f"  {t:<15} {n:>3} facturas  {pesos(v):>14}")
-
-    print(f"\n  Pendiente vigente (ultimo anio): {pesos(cxc['total_vigente'])} en {cxc['facturas_vigentes']} facturas")
-    for c, v in cxc["deudores"][:6]:
+    print("CUENTAS POR COBRAR 2026 (MARGEN X VENTAS, montos con IVA)")
+    print(f"  Total: {pesos(cxc['total'])} en {cxc['ordenes']} ordenes")
+    for estado, (n, v) in cxc["por_estado"].items():
+        print(f"    {estado:<12} {n:>3} ordenes  {pesos(v):>12}")
+    print("\n  Por cliente:")
+    for c, v in cxc["deudores"][:8]:
         print(f"    {c:<35} {pesos(v):>12}")
-
-    if cxc["viejas"]:
-        print(f"\n  A REVISAR - sin cobrar hace mas de 1 anio ({len(cxc['viejas'])} facturas):")
-        for p in sorted(cxc["viejas"], key=lambda x: -x["importe"])[:10]:
-            print(f"    fila {p['fila']:>4} | factura {p['factura']!s:<5} | {p['fecha']:%d/%m/%Y} | "
-                  f"{p['cliente'][:25]:<25} | {pesos(p['importe']):>12}")
-
+    print("\n  Ordenes mas grandes:")
+    for p in cxc["pendientes"][:6]:
+        atraso = f"{p['meses_atraso']} meses" if p["meses_atraso"] is not None else "?"
+        print(f"    fila {p['fila']:>4} | {p['mes']:<4} ({atraso:>8}) | {p['cliente'][:28]:<28} | "
+              f"{pesos(p['importe']):>12} | {p['estado']}")
     if cxc["ambiguas"]:
-        print(f"\n  Ambiguas (no contadas): {len(cxc['ambiguas'])} facturas por "
-              f"{pesos(sum(a['importe'] for a in cxc['ambiguas']))}")
+        print(f"\n  Ambiguas: {len(cxc['ambiguas'])} ordenes, marcadas como: "
+              f"{', '.join(sorted({a['marca'] for a in cxc['ambiguas']}))}")
+
+    print(f"\nHISTORICO A DEPURAR (FACTURA Santander, ultima factura {hist['ultima_factura']:%d/%m/%Y})")
+    print(f"  {hist['facturas']} facturas nunca marcadas como cobradas: {pesos(hist['total'])}")
 
     print(f"\nCONCENTRACION DE CLIENTES ({r['meses'][0]}-{r['meses'][-1]}, ventas brutas)")
-    print(f"  {conc['clientes']} clientes, {pesos(conc['total'])}")
-    print(f"  Top {conc['top_n']} = {numero(conc['pct_top'], 1)}% de las ventas")
-    for x in conc["ranking"][:6]:
+    print(f"  {conc['clientes']} clientes, {pesos(conc['total'])} | "
+          f"Top {conc['top_n']} = {numero(conc['pct_top'], 1)}%")
+    for x in conc["ranking"][:5]:
         print(f"    {x['cliente']:<35} {pesos(x['monto']):>12}  ({numero(x['pct'], 1)}%)")
