@@ -5,7 +5,7 @@ from datetime import date
 
 from google_sheets import conectar, leer_varias, pestanias
 from resultado import MESES, numero
-from productos import MESES_LARGOS, a_numero
+from productos import MESES_LARGOS
 
 FABRICAS = {
     "Almirante":       "1WLXv5fJrT00V9ySfve1nJV9vTcZIF22NCxwKQwJMCLA",
@@ -26,7 +26,7 @@ def sin_acentos(s):
 
 
 def mes_desde_palabra(palabra):
-    """'SEP' / 'Abril' / 'JUNIO' / 'sept' -> numero de mes. 'envio' -> None."""
+    """'SEP' / 'Abril' / 'JUNIO' / 'Sept' / 'AGOST' -> numero de mes. 'envio' -> None."""
     t = sin_acentos(palabra).upper()
     if t in MESES_LARGOS:
         return MESES_LARGOS.index(t) + 1
@@ -37,8 +37,8 @@ def mes_desde_palabra(palabra):
 
 
 def periodo_de_pestania(nombre):
-    """'SEP26' -> (2026, 9) | 'MAR26 Bis' -> (2026, 3) | 'Abril25' -> (2025, 4) | 'Acuerdos' -> None."""
-    for m in re.finditer(r"([A-Za-zÁÉÍÓÚáéíóúñÑ]{3,})\s*(\d{4}|\d{2})(?!\d)", nombre):
+    """'SEP26' -> (2026, 9) | 'MAR26 Bis' -> (2026, 3) | 'NOV 25' -> (2025, 11) | 'Acuerdos' -> None."""
+    for m in re.finditer(r"([A-Za-zÁÉÍÓÚáéíóúñÑ]{3,})[\s\-_/.']*(\d{4}|\d{2})(?!\d)", nombre):
         mes = mes_desde_palabra(m.group(1))
         if mes:
             anio = int(m.group(2))
@@ -46,23 +46,55 @@ def periodo_de_pestania(nombre):
     return None
 
 
+def a_cantidad(v):
+    """Cantidad de bolsas: 38 o '38'. Precios ('$72,163'), 'SIN STOCK' o vacio -> None."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip().replace(",", "."))
+    except ValueError:
+        return None
+
+
+def es_total(fila):
+    return bool(fila) and sin_acentos(str(fila[0])).upper().startswith("TOTAL")
+
+
 def cantidad_pedido(filas):
     """(bolsas, kilos) de una pestania mensual."""
-    total_fila, suma, kilos = None, 0.0, 0.0
-    for fila in filas:
+    # 1) fila de encabezados y columna de cantidades, buscando "Cantidad" en las primeras filas
+    inicio, col = None, None
+    for i, fila in enumerate(filas[:6]):
+        cols = [j for j, v in enumerate(fila) if "CANTIDAD" in sin_acentos(str(v)).upper()]
+        if cols:
+            inicio, col = i + 1, cols[0]
+            break
+
+    # 2) sin encabezado "Cantidad" (caso Straus): la columna es la que tiene un numero
+    #    chico (bolsas) en la fila TOTAL; el monto en pesos es grande
+    if col is None:
+        fila_total = next((f for f in filas if es_total(f)), [])
+        candidatas = [j for j in range(1, min(5, len(fila_total)))
+                      if a_cantidad(fila_total[j]) is not None and 0 <= a_cantidad(fila_total[j]) < 10000]
+        col = candidatas[0] if candidatas else 1
+        inicio = next((i + 1 for i, f in enumerate(filas[:6])
+                       if f and "VARIEDAD" in sin_acentos(str(f[0])).upper()), 1)
+
+    # 3) recorrer los productos desde el encabezado hasta la fila TOTAL
+    total, suma, kilos = None, 0.0, 0.0
+    for fila in filas[inicio:]:
         if not fila or not str(fila[0]).strip():
             continue
-        etiqueta = sin_acentos(str(fila[0])).upper()
-        cant = fila[1] if len(fila) > 1 and isinstance(fila[1], (int, float)) else None
-        if etiqueta.startswith("TOTAL"):
-            total_fila = cant if cant is not None else total_fila
-            continue
+        cant = a_cantidad(fila[col]) if col < len(fila) else None
+        if es_total(fila):
+            total = cant              # si la fila TOTAL dice 0, el pedido vale 0
+            break
         if cant and cant > 0:
             suma += cant
-            m = re.search(r"(\d+([.,]\d+)?)\s*KG", etiqueta)
+            m = re.search(r"(\d+([.,]\d+)?)\s*KG", sin_acentos(str(fila[0])).upper())
             if m:
                 kilos += cant * float(m.group(1).replace(",", "."))
-    return (total_fila if total_fila is not None else suma), kilos
+    return (total if total is not None else suma), kilos
 
 
 def rangos(meses):
@@ -89,14 +121,14 @@ def analizar_fabrica(sheets, sheet_id, anio, hasta, mes_hoy):
             del_anio.setdefault(p[1], []).append(t)       # 'MAR26' y 'MAR26 Bis' -> mismo mes
     datos = leer_varias(sheets, sheet_id, [t for ts in del_anio.values() for t in ts])
 
-    con_pedido, vacias, kilos_mes = [], [], {}
+    con_pedido, vacias, kilos_mes, bolsas_mes = [], [], {}, {}
     for mes, tabs in del_anio.items():
         bolsas = kilos = 0.0
         for t in tabs:
             b, k = cantidad_pedido(datos[t])
             bolsas, kilos = bolsas + b, kilos + k
         (con_pedido if bolsas > 0 else vacias).append(mes)
-        kilos_mes[mes] = kilos
+        kilos_mes[mes], bolsas_mes[mes] = kilos, bolsas
 
     rango = range(1, hasta + 1)
     return {
@@ -106,6 +138,7 @@ def analizar_fabrica(sheets, sheet_id, anio, hasta, mes_hoy):
         "vacias": [m for m in vacias if m in rango],
         "kilos_anio": sum(v for m, v in kilos_mes.items() if m in rango),
         "kilos_mes": kilos_mes,
+        "bolsas_mes": bolsas_mes,
         "mes_en_curso": None if INCLUIR_MES_EN_CURSO else (mes_hoy in con_pedido),
     }
 
@@ -133,6 +166,9 @@ if __name__ == "__main__":
         pct = r["activos"] / r["total"] * 100
         print(f"  {nombre:<16} {r['activos']}/{r['total']} meses con pedido ({pct:.0f}%)  "
               f"- {numero(r['kilos_anio'])} kg en el anio")
+        detalle = [f"{MESES[m - 1]}: {numero(r['bolsas_mes'][m])} bolsas / {numero(r['kilos_mes'][m])} kg"
+                   for m in sorted(r["bolsas_mes"]) if r["bolsas_mes"][m] > 0]
+        print(f"      Pedidos: {' | '.join(detalle) or 'ninguno'}")
         faltan = []
         if r["sin_planilla"]:
             faltan.append(f"{rangos(r['sin_planilla'])} (sin planilla)")
