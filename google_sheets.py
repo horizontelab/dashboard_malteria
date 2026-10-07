@@ -24,3 +24,22 @@ def leer_hoja(sheets, sheet_id, hoja):
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
     return resp.get("values", [])
+
+
+def pestanias(sheets, sheet_id):
+    """Nombres de todas las pestanias de una planilla."""
+    meta = sheets.spreadsheets().get(
+        spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
+    return [s["properties"]["title"] for s in meta["sheets"]]
+
+
+def leer_varias(sheets, sheet_id, hojas):
+    """Lee varias pestanias en UNA sola consulta (cuida el limite de la API)."""
+    if not hojas:
+        return {}
+    resp = sheets.spreadsheets().values().batchGet(
+        spreadsheetId=sheet_id,
+        ranges=["'" + h.replace("'", "''") + "'" for h in hojas],
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute()
+    return {h: vr.get("values", []) for h, vr in zip(hojas, resp.get("valueRanges", []))}
