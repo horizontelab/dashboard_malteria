@@ -1,4 +1,7 @@
-"""Conexion con Google Sheets. Todos los bloques usan estas dos funciones."""
+"""Conexion con Google Sheets. Todos los bloques usan estas funciones."""
+import json
+import os
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -9,18 +12,21 @@ SCOPES = [
 
 
 def conectar():
-    """Devuelve un cliente de la API de Sheets autenticado con la cuenta de servicio."""
-    creds = service_account.Credentials.from_service_account_file(
-        "credenciales.json", scopes=SCOPES
-    )
-    return build("sheets", "v4", credentials=creds)
+    """Cliente de la API de Sheets. En el servidor usa la variable GOOGLE_SERVICE_ACCOUNT_JSON;
+    en tu compu, el archivo credenciales.json."""
+    info = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if info:
+        creds = service_account.Credentials.from_service_account_info(json.loads(info), scopes=SCOPES)
+    else:
+        creds = service_account.Credentials.from_service_account_file("credenciales.json", scopes=SCOPES)
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def leer_hoja(sheets, sheet_id, hoja):
-    """Devuelve todas las filas de una pestaña como lista de listas, con numeros crudos."""
+    """Todas las filas de una pestania, con numeros crudos."""
     resp = sheets.spreadsheets().values().get(
         spreadsheetId=sheet_id,
-        range=f"'{hoja}'",          # solo el nombre = la hoja completa
+        range="'" + hoja.replace("'", "''") + "'",
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
     return resp.get("values", [])
