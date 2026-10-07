@@ -1,0 +1,4 @@
+.venv/
+credenciales.json
+dist/
+__pycache__/
