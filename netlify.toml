@@ -1,0 +1,9 @@
+# Netlify arma el dashboard en cada deploy y publica dist/
+[build]
+  command = "pip install -r requirements.txt && python armar_dashboard.py"
+  publish = "dist"
+
+# Clave para entrar (variables DASHBOARD_USUARIO y DASHBOARD_CLAVE)
+[[edge_functions]]
+  function = "clave"
+  path = "/*"
